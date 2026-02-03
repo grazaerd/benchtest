@@ -1,0 +1,26 @@
+SIMD stuff and micro-optimization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
