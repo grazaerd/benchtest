@@ -127,7 +127,10 @@ inline const char* var4 =
     "sociosqu ad litora torquent per conubia nostra inceptos himenaeos orci "
     "varius natoque penatibus et magnis dis montes parturient nascetur";
 
-inline const char* var5 = "resourceexttss\\";
+inline const char* var5 = "resourceexttssxx\\";
+
+inline const char* var6 = "RN01_Sainthaven_A_GoddessStatue_Renew_Waterfall.skn";
+inline const char* var7 = "RN01_Sainthaven_A_GoddessStatue_Renew_Waterfall.skx";
 
 
 #endif

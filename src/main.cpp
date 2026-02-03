@@ -8,8 +8,11 @@
 #include "Inc/DirectXMath.h"
 #include "read.hpp"
 typedef D3DXMATRIX* (WINAPI *PFN_D3DXMatrixMultiply)(D3DXMATRIX*, const D3DXMATRIX*, const D3DXMATRIX*);
+typedef int (WINAPI *B_strcmp)(const char*, const char*);
 static HMODULE hD3DX = LoadLibraryA("d3dx9_43.dll");
+static HMODULE libasm = LoadLibraryA("libad64.dll");
 static PFN_D3DXMatrixMultiply pD3DXMatrixMultiply = (PFN_D3DXMatrixMultiply)GetProcAddress(hD3DX, "D3DXMatrixMultiply");
+static B_strcmp Astrcmp = (B_strcmp)GetProcAddress(libasm, "A_stricmp");
 
 D3DXMATRIX A;
 D3DXMATRIX B;
@@ -289,6 +292,38 @@ int strcasecmp_sse2(const char* s0, const char* s1) {
         s1 += 16;
     }
 }
+__attribute__((noinline))
+int strcmp_sse2v3(const char *s0, const char *s1) {
+    if (__builtin_expect((s0 == nullptr || s1 == nullptr), 0)) {
+        return (s0 == s1 ? 0 : (s0 == nullptr ? -1 : 1));
+    }
+    const __m128i *lp = (const __m128i *)s0;
+    const __m128i *rp = (const __m128i *)s1;
+    const __m128i all0 = _mm_setzero_si128();
+    const __m128i upper_mask = _mm_set1_epi8(static_cast<char>(0xDF));
+
+    __m128i l, r;
+    unsigned int m;
+    size_t i = 0;
+
+    do {
+        l = _mm_loadu_si128(lp + i);
+        r = _mm_loadu_si128(rp + i);
+        const __m128i case_lcl = _mm_and_si128(l, upper_mask);
+        const __m128i case_lcr = _mm_and_si128(r, upper_mask);
+        __m128i eq = _mm_cmpeq_epi8(l, r);
+        __m128i null_mask = _mm_cmpeq_epi8(l, all0);
+
+        m = (unsigned int)_mm_movemask_epi8(_mm_or_si128(null_mask, _mm_andnot_si128(eq, _mm_set1_epi8(-1))));
+
+        ++i;
+    } while (!m);
+
+    int index = __builtin_ctz(m);
+    const unsigned char* p0 = reinterpret_cast<const unsigned char*>(s0) + ((i - 1) * 16);
+    const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1) + ((i - 1) * 16);
+    return (int)p0[index] - (int)p1[index];
+}
 inline __m128i upcase_si128(__m128i src) { // Peter Cordes upcase
     // The above 2 paragraphs were comments here
     __m128i rangeshift = _mm_sub_epi8(src, _mm_set1_epi8('a' + 128));
@@ -424,7 +459,7 @@ void bm_strcasecmptest3(benchmark::State& s){
     int out = 0;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = stricmp(var2, var9)
+            out = strcmp_sse2v3(var2, var9)
         );
         benchmark::ClobberMemory();
     }
@@ -463,7 +498,9 @@ char* strchr_sse42(const char* str, int c) {
     const __m128i v_char = _mm_set1_epi8(static_cast<char>(c));
 
     const int result = _mm_cmpistri(v_char, data, _SIDD_CMP_EQUAL_EACH);
-
+    if (result == 16) {
+        return 0;
+    }
     return (char*)(str + result);
 }
 
@@ -476,7 +513,6 @@ void bm_strchr(benchmark::State& s){
         benchmark::ClobberMemory();
     }
 }
-__attribute__((noinline))
 void bm_strchrsse4(benchmark::State& s){
     char* out;
     for (auto _ : s) {
@@ -486,6 +522,298 @@ void bm_strchrsse4(benchmark::State& s){
         benchmark::ClobberMemory();
     }
 }
+__attribute__((noinline))
+int strcmp_sse2(const char *s0, const char *s1) {
+    const __m128i *lp = (const __m128i *)s0;
+    const __m128i *rp = (const __m128i *)s1;
+    const __m128i all0 = _mm_setzero_si128();
+
+    __m128i l, r;
+    unsigned int m;
+    size_t i = 0;
+
+    do {
+        l = _mm_loadu_si128(lp + i);
+        r = _mm_loadu_si128(rp + i);
+
+        __m128i eq = _mm_cmpeq_epi8(l, r);
+        __m128i null_mask = _mm_cmpeq_epi8(l, all0);
+
+        m = (unsigned int)_mm_movemask_epi8(_mm_or_si128(null_mask, _mm_andnot_si128(eq, _mm_set1_epi8(-1))));
+
+        ++i;
+    } while (!m);
+
+    int index = __builtin_ctz(m);
+    const unsigned char* p0 = reinterpret_cast<const unsigned char*>(s0) + ((i - 1) * 16);
+    const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1) + ((i - 1) * 16);
+    return (int)p0[index] - (int)p1[index];
+}
+__attribute__((noinline))
+int strcmp_sse42(const char* s1, const char* s2) {
+    while (true) {
+        const int mode = _SIDD_CMP_EQUAL_EACH | _SIDD_NEGATIVE_POLARITY;
+        __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s1));
+        __m128i v2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s2));
+        int v3 = _mm_cmpistri(v1, v2, mode);
+        if (v3 != 16) {
+            unsigned char ca = static_cast<unsigned char>(s1[v3]);
+            unsigned char cb = static_cast<unsigned char>(s2[v3]);
+            return static_cast<int>(ca) - static_cast<int>(cb);
+        }
+
+        if (_mm_cmpistrz(v1, v2, mode)) {
+            return 0;
+        }
+
+        s1 += 16;
+        s2 += 16;
+    }
+    // return 0;
+}
+void bm_strcmpsse2(benchmark::State& s){
+    int out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = strcmp_sse2(var6, var7)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+void bm_strcmpsse4(benchmark::State& s){
+    int out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = strcmp_sse42(var6, var7)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+
+__attribute__((noinline))
+int cst_time_memcmp_fastest1(const void *m1, const void *m2, size_t n) {
+    const unsigned char *pm1 = (const unsigned char*)m1;
+    const unsigned char *pm2 = (const unsigned char*)m2;
+    int res = 0, diff;
+    if (n > 0) {
+        do {
+            --n;
+            diff = pm1[n] - pm2[n];
+            res = (res & -!diff) | diff;
+        } while (n != 0);
+    }
+    return (res > 0) - (res < 0);
+}
+
+__attribute__((noinline))
+int memcmp_sse2(const void* a_void, const void* b_void, std::uint64_t size) {
+    const char* a = static_cast<const char*>(a_void);
+    const char* b = static_cast<const char*>(b_void);
+    std::uint64_t offset = 0;
+    for (; offset + 16 <= size; offset += 16) {
+        __m128i_u va = _mm_loadu_si128(reinterpret_cast<const __m128i_u*>(a + offset));
+        __m128i_u vb = _mm_loadu_si128(reinterpret_cast<const __m128i_u*>(b + offset));
+        __m128i cmp = _mm_xor_si128(va, vb);
+        int eqmask = _mm_movemask_epi8(_mm_cmpeq_epi8(cmp, _mm_setzero_si128()));
+        unsigned int diffmask = (~static_cast<unsigned int>(eqmask)) & 0xFFFFu;
+
+        if (diffmask) {
+            std::uint64_t diff_byte_in_chunk = static_cast<std::uint64_t>(__builtin_ctz(diffmask));
+            return static_cast<int>(static_cast<unsigned char>(a[offset + diff_byte_in_chunk]) -
+                                    static_cast<unsigned char>(b[offset + diff_byte_in_chunk]));
+        }
+    }
+    return memcmp(a + offset, b + offset, size - offset);
+}
+__attribute__((noinline))
+int memcmp_scalar(const char* a, const char* b, std::uint64_t size) {
+    return std::memcmp(a, b, size);
+}
+
+int avx2_memcmp(const void *s1, const void *s2, size_t n) {
+    const unsigned char *p1 = (const unsigned char *)s1;
+    const unsigned char *p2 = (const unsigned char *)s2;
+
+    while (n >= 32) {
+        __m256i v1 = _mm256_loadu_si256((const __m256i *)p1);
+        __m256i v2 = _mm256_loadu_si256((const __m256i *)p2);
+
+        __m256i cmp = _mm256_cmpeq_epi8(v1, v2);
+
+        uint32_t mask = _mm256_movemask_epi8(cmp);
+
+        if (mask != 0xFFFFFFFF) {
+            uint32_t first_mismatch = __builtin_ctz(~mask);
+            return (int)p1[first_mismatch] - (int)p2[first_mismatch];
+        }
+
+        p1 += 32;
+        p2 += 32;
+        n -= 32;
+    }
+
+    if (n >= 16) {
+        __m128i v1 = _mm_loadu_si128((const __m128i *)p1);
+        __m128i v2 = _mm_loadu_si128((const __m128i *)p2);
+        __m128i cmp = _mm_cmpeq_epi8(v1, v2);
+        uint32_t mask = _mm_movemask_epi8(cmp);
+
+        if (mask != 0xFFFF) {
+            uint32_t first_mismatch = __builtin_ctz(~mask);
+            return (int)p1[first_mismatch] - (int)p2[first_mismatch];
+        }
+        p1 += 16;
+        p2 += 16;
+        n -= 16;
+    }
+    // slow vs memcmp on
+    // 1,7,11 14 and 15 I think
+    if (n >= 8) {
+        uint64_t a = *(uint64_t*)p1;
+        uint64_t b = *(uint64_t*)p2;
+
+        int diff = (int)a - (int)b;
+        if (diff) {
+            return (diff > 0) - (diff < 0);
+        }
+
+        p1 += 8;
+        p2 += 8;
+        n -= 8;
+    }
+
+    if (n >= 4) {
+        uint32_t a = *(uint32_t*)p1;
+        uint32_t b = *(uint32_t*)p2;
+
+        int diff = (int)a - (int)b;
+        if (diff) {
+            return (diff > 0) - (diff < 0);
+        }
+
+        p1 += 4;
+        p2 += 4;
+        n -= 4;
+    }
+    if (n >= 2) {
+        uint16_t a = *(uint16_t*)p1;
+        uint16_t b = *(uint16_t*)p2;
+
+        int diff = (int)a - (int)b;
+        if (diff) {
+            return (diff > 0) - (diff < 0);
+        }
+
+        p1 += 2;
+        p2 += 2;
+        n -= 2;
+    }
+    if (n) {
+        uint8_t a = *(uint8_t*)p1;
+        uint8_t b = *(uint8_t*)p2;
+
+        int diff = (int)a - (int)b;
+        return (diff > 0) - (diff < 0);
+    }
+    // switch(n) {
+    //     case 1: {
+    //         int var2 = *(uint8_t*)s1 - *(uint8_t*)s2;
+    //         if (var2 < 0) {
+    //             return -1;
+    //         } else if (var2 > 0) {
+    //             return 1;
+    //         } else {
+    //             return 0;
+    //         }
+    //         break;
+    //     }
+    //     case 2: {
+    //         int var2 = *(uint16_t*)s1 - *(uint16_t*)s2;
+    //         if (var2 < 0) {
+    //             return -1;
+    //         } else if (var2 > 0) {
+    //             return 1;
+    //         } else {
+    //             return 0;
+    //         }
+    //         break;
+    //     }
+    //     case 3: {
+    //         int var2 = *(uint16_t*)s1 - *(uint16_t*)s2;
+    //         int var3 = *(uint8_t*)(p1+2) - *(uint8_t*)(p2+2);
+    //         int var4 = var2 + var3;
+    //         if (var4 < 0) {
+    //             return -1;
+    //         } else if (var4 > 0) {
+    //             return 1;
+    //         } else {
+    //             return 0;
+    //         }
+    //         break;
+    //     }
+    //     case 4: {
+    //         int var2 = *(uint32_t*)s1 - *(uint32_t*)s2;
+    //         if (var2 < 0) {
+    //             return -1;
+    //         } else if (var2 > 0) {
+    //             return 1;
+    //         } else {
+    //             return 0;
+    //         }
+    //         break;
+    //     }
+
+    //     case 8: {
+    //         int64_t var2 = *(uint64_t*)s1 - *(uint64_t*)s2;
+    //         if (var2 < 0) {
+    //             return -1;
+    //         } else if (var2 > 0) {
+    //             return 1;
+    //         } else {
+    //             return 0;
+    //         }
+    //         break;
+    //     }
+
+    // }
+    // while (n--) {
+    //     if (*p1 != *p2) {
+    //         return (int)*p1 - (int)*p2;
+    //     }
+    //     p1++;
+    //     p2++;
+    // }
+
+    return 0;
+}
+    // try movbe/bswap on byte 3 to 7
+void bm_memcmp(benchmark::State& s){
+    int out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = memcmp(var6, var7, 0)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+void bm_memcmpsse2(benchmark::State& s){
+    int out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = avx2_memcmp(var6, var7, 0)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+
+
+/* memcmp */
+BENCHMARK(bm_memcmp);
+BENCHMARK(bm_memcmpsse2);
+
+/* strcmp */
+// BENCHMARK(bm_strcmpsse2);
+// BENCHMARK(bm_strcmpsse4);
 
 /* strchr */
 // BENCHMARK(bm_strchr);
