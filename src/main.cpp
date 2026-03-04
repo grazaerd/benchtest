@@ -547,6 +547,45 @@ int strcmp_sse2(const char *s0, const char *s1) {
     int index = __builtin_ctz(m);
     const unsigned char* p0 = reinterpret_cast<const unsigned char*>(s0) + ((i - 1) * 16);
     const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1) + ((i - 1) * 16);
+    // 6-10ns increase compare to return (int)p0[index] - (int)p1[index];
+    auto val = (int)p0[index] - (int)p1[index];
+    if (val < 0) {
+        return -1;
+    } else if (val > 0) {
+        return 1;
+    }
+    return 0;
+}
+__attribute__((noinline))
+int strcmp_avx2(const char *s0, const char *s1) {
+    const __m256i *lp = (const __m256i *)s0;
+    const __m256i *rp = (const __m256i *)s1;
+    const __m256i all0 = _mm256_setzero_si256();
+    const __m256i all1 = _mm256_set1_epi8(-1);
+
+    __m256i l, r;
+    unsigned int m;
+    size_t i = 0;
+
+    do {
+        l = _mm256_loadu_si256(lp + i);
+        r = _mm256_loadu_si256(rp + i);
+
+        __m256i eq = _mm256_cmpeq_epi8(l, r);
+        __m256i null_mask = _mm256_cmpeq_epi8(l, all0);
+
+        m = (unsigned int)_mm256_movemask_epi8(
+            _mm256_or_si256(null_mask, _mm256_andnot_si256(eq, all1))
+        );
+
+        ++i;
+    } while (!m);
+
+    int index = __builtin_ctz(m);
+
+    const unsigned char* p0 = reinterpret_cast<const unsigned char*>(s0) + ((i - 1) * 32);
+    const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1) + ((i - 1) * 32);
+
     return (int)p0[index] - (int)p1[index];
 }
 __attribute__((noinline))
@@ -571,6 +610,40 @@ int strcmp_sse42(const char* s1, const char* s2) {
     }
     // return 0;
 }
+__attribute__((noinline))
+int strcmp_sse41(const char *s0, const char *s1) {
+    const __m128i *lp = (const __m128i *)s0;
+    const __m128i *rp = (const __m128i *)s1;
+
+    const __m128i zero = _mm_setzero_si128();
+    size_t i = 0;
+
+    while (1) {
+        __m128i l = _mm_loadu_si128(lp + i);
+        __m128i r = _mm_loadu_si128(rp + i);
+
+        __m128i diff = _mm_xor_si128(l, r);
+
+        __m128i null_mask = _mm_cmpeq_epi8(l, zero);
+
+        __m128i stop_mask = _mm_or_si128(diff, null_mask);
+
+        if (!_mm_testz_si128(stop_mask, stop_mask)) {
+            unsigned int m = _mm_movemask_epi8(stop_mask);
+            int index = __builtin_ctz(m);
+
+            const unsigned char* p0 =
+                reinterpret_cast<const unsigned char*>(s0) + i * 16;
+            const unsigned char* p1 =
+                reinterpret_cast<const unsigned char*>(s1) + i * 16;
+
+            int val = (int)p0[index] - (int)p1[index];
+            return (val > 0) - (val < 0);
+        }
+
+        ++i;
+    }
+}
 void bm_strcmpsse2(benchmark::State& s){
     int out;
     for (auto _ : s) {
@@ -584,14 +657,14 @@ void bm_strcmpsse4(benchmark::State& s){
     int out;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = strcmp_sse42(var6, var7)
+            // out = strcmp_sse42(var6, var7)
+            out = strcmp_sse41(var6, var7)
         );
         benchmark::ClobberMemory();
     }
 }
 
-__attribute__((noinline))
-int cst_time_memcmp_fastest1(const void *m1, const void *m2, size_t n) {
+inline int cst_time_memcmp_fastest1(const void *m1, const void *m2, size_t n) {
     const unsigned char *pm1 = (const unsigned char*)m1;
     const unsigned char *pm2 = (const unsigned char*)m2;
     int res = 0, diff;
@@ -625,11 +698,101 @@ int memcmp_sse2(const void* a_void, const void* b_void, std::uint64_t size) {
     }
     return memcmp(a + offset, b + offset, size - offset);
 }
+// needed since direct memcmp on benchmark::DoNotOptimize will be optimized
 __attribute__((noinline))
 int memcmp_scalar(const char* a, const char* b, std::uint64_t size) {
     return std::memcmp(a, b, size);
 }
 
+inline int safe_fast_memcmp(const void* s1, const void* s2, size_t n) {
+    const uint8_t *p1 = (const uint8_t*)s1, *p2 = (const uint8_t*)s2;
+
+    if (n >= 8) {
+        uint64_t a, b;
+        __builtin_memcpy(&a, p1, 8);
+        __builtin_memcpy(&b, p2, 8);
+        if (a != b) goto diff64;
+
+        __builtin_memcpy(&a, p1 + n - 8, 8);
+        __builtin_memcpy(&b, p2 + n - 8, 8);
+        if (a != b) goto diff64;
+        return 0;
+    diff64:
+        a = __builtin_bswap64(a); b = __builtin_bswap64(b);
+        return (a > b) ? 1 : -1;
+    }
+
+    if (n >= 4) {
+        uint32_t a, b;
+        __builtin_memcpy(&a, p1, 4);
+        __builtin_memcpy(&b, p2, 4);
+        if (a != b) goto diff32;
+
+        __builtin_memcpy(&a, p1 + n - 4, 4);
+        __builtin_memcpy(&b, p2 + n - 4, 4);
+        if (a != b) goto diff32;
+        return 0;
+    diff32:
+        a = __builtin_bswap32(a); b = __builtin_bswap32(b);
+        return (a > b) ? 1 : -1;
+    }
+
+    if (n >= 2) {
+        uint16_t a, b;
+        __builtin_memcpy(&a, p1, 2);
+        __builtin_memcpy(&b, p2, 2);
+        if (a != b) goto diff16;
+
+        __builtin_memcpy(&a, p1 + n - 2, 2);
+        __builtin_memcpy(&b, p2 + n - 2, 2);
+        if (a != b) goto diff16;
+        return 0;
+    diff16:
+        a = __builtin_bswap16(a); b = __builtin_bswap16(b);
+        return (a > b) ? 1 : -1;
+    }
+
+    return n ? (int)*p1 - (int)*p2 : 0;
+}
+inline int safe_fast_memcmp2(const void* s1, const void* s2, size_t n) {
+    const uint8_t *p1 = (const uint8_t*)s1, *p2 = (const uint8_t*)s2;
+
+    if (n >= 8) {
+        uint64_t a, b;
+        __builtin_memcpy(&a, p1, 8); __builtin_memcpy(&b, p2, 8);
+        if (a != b) {
+            return __builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1;
+        }
+
+        __builtin_memcpy(&a, p1 + n - 8, 8); __builtin_memcpy(&b, p2 + n - 8, 8);
+        return (a == b) ? 0 : (__builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1);
+    }
+
+    if (n >= 4) {
+        uint32_t a, b;
+        __builtin_memcpy(&a, p1, 4); __builtin_memcpy(&b, p2, 4);
+        if (a != b) {
+            return __builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1;
+        }
+
+        __builtin_memcpy(&a, p1 + n - 4, 4); __builtin_memcpy(&b, p2 + n - 4, 4);
+        return (a == b) ? 0 : (__builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1);
+    }
+
+    if (n >= 2) {
+        uint16_t a, b;
+        __builtin_memcpy(&a, p1, 2); __builtin_memcpy(&b, p2, 2);
+        if (a != b) {
+            return __builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1;
+        }
+
+        __builtin_memcpy(&a, p1 + n - 2, 2); __builtin_memcpy(&b, p2 + n - 2, 2);
+        return (a == b) ? 0 : (__builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1);
+    }
+
+    return n ? (int)*p1 - (int)*p2 : 0;
+}
+__attribute__((noinline))
 int avx2_memcmp(const void *s1, const void *s2, size_t n) {
     const unsigned char *p1 = (const unsigned char *)s1;
     const unsigned char *p2 = (const unsigned char *)s2;
@@ -666,132 +829,15 @@ int avx2_memcmp(const void *s1, const void *s2, size_t n) {
         p2 += 16;
         n -= 16;
     }
-    // slow vs memcmp on
-    // 1,7,11 14 and 15 I think
-    if (n >= 8) {
-        uint64_t a = *(uint64_t*)p1;
-        uint64_t b = *(uint64_t*)p2;
 
-        int diff = (int)a - (int)b;
-        if (diff) {
-            return (diff > 0) - (diff < 0);
-        }
-
-        p1 += 8;
-        p2 += 8;
-        n -= 8;
-    }
-
-    if (n >= 4) {
-        uint32_t a = *(uint32_t*)p1;
-        uint32_t b = *(uint32_t*)p2;
-
-        int diff = (int)a - (int)b;
-        if (diff) {
-            return (diff > 0) - (diff < 0);
-        }
-
-        p1 += 4;
-        p2 += 4;
-        n -= 4;
-    }
-    if (n >= 2) {
-        uint16_t a = *(uint16_t*)p1;
-        uint16_t b = *(uint16_t*)p2;
-
-        int diff = (int)a - (int)b;
-        if (diff) {
-            return (diff > 0) - (diff < 0);
-        }
-
-        p1 += 2;
-        p2 += 2;
-        n -= 2;
-    }
-    if (n) {
-        uint8_t a = *(uint8_t*)p1;
-        uint8_t b = *(uint8_t*)p2;
-
-        int diff = (int)a - (int)b;
-        return (diff > 0) - (diff < 0);
-    }
-    // switch(n) {
-    //     case 1: {
-    //         int var2 = *(uint8_t*)s1 - *(uint8_t*)s2;
-    //         if (var2 < 0) {
-    //             return -1;
-    //         } else if (var2 > 0) {
-    //             return 1;
-    //         } else {
-    //             return 0;
-    //         }
-    //         break;
-    //     }
-    //     case 2: {
-    //         int var2 = *(uint16_t*)s1 - *(uint16_t*)s2;
-    //         if (var2 < 0) {
-    //             return -1;
-    //         } else if (var2 > 0) {
-    //             return 1;
-    //         } else {
-    //             return 0;
-    //         }
-    //         break;
-    //     }
-    //     case 3: {
-    //         int var2 = *(uint16_t*)s1 - *(uint16_t*)s2;
-    //         int var3 = *(uint8_t*)(p1+2) - *(uint8_t*)(p2+2);
-    //         int var4 = var2 + var3;
-    //         if (var4 < 0) {
-    //             return -1;
-    //         } else if (var4 > 0) {
-    //             return 1;
-    //         } else {
-    //             return 0;
-    //         }
-    //         break;
-    //     }
-    //     case 4: {
-    //         int var2 = *(uint32_t*)s1 - *(uint32_t*)s2;
-    //         if (var2 < 0) {
-    //             return -1;
-    //         } else if (var2 > 0) {
-    //             return 1;
-    //         } else {
-    //             return 0;
-    //         }
-    //         break;
-    //     }
-
-    //     case 8: {
-    //         int64_t var2 = *(uint64_t*)s1 - *(uint64_t*)s2;
-    //         if (var2 < 0) {
-    //             return -1;
-    //         } else if (var2 > 0) {
-    //             return 1;
-    //         } else {
-    //             return 0;
-    //         }
-    //         break;
-    //     }
-
-    // }
-    // while (n--) {
-    //     if (*p1 != *p2) {
-    //         return (int)*p1 - (int)*p2;
-    //     }
-    //     p1++;
-    //     p2++;
-    // }
-
-    return 0;
+    return safe_fast_memcmp2(p1, p2, n);
 }
-    // try movbe/bswap on byte 3 to 7
+
 void bm_memcmp(benchmark::State& s){
     int out;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = memcmp(var6, var7, 0)
+            out = memcmp_scalar(var6, var7, 7)
         );
         benchmark::ClobberMemory();
     }
@@ -800,12 +846,12 @@ void bm_memcmpsse2(benchmark::State& s){
     int out;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = avx2_memcmp(var6, var7, 0)
+            out = avx2_memcmp(var6, var7, 7)
         );
         benchmark::ClobberMemory();
     }
 }
-
+    // 1,7,11 14 and 15
 
 /* memcmp */
 BENCHMARK(bm_memcmp);
