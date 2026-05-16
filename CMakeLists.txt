@@ -15,8 +15,8 @@ set(BENCHMARK_ENABLE_DOXYGEN       OFF CACHE BOOL "Disable doxygen" FORCE)
 set(BENCHMARK_INSTALL_DOCS         OFF CACHE BOOL "Disable doc install" FORCE)
 set(BENCHMARK_ENABLE_INSTALL       OFF CACHE BOOL "Disable installation" FORCE)
 
-set(CMAKE_C_FLAGS "-O3 -ffast-math -mfma -mavx2 -falign-functions=32 -falign-loops=32 -mavx -mbranches-within-32B-boundaries -msse4 -mlzcnt -mbmi -fuse-ld=lld -fno-common -fno-record-gcc-switches -pthread -DNDEBUG -static -fomit-frame-pointer -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -fdata-sections -ffunction-sections")
-set(CMAKE_CXX_FLAGS "-O3 -ffast-math -mfma -mavx2 -falign-functions=32 -falign-loops=32 -mbranches-within-32B-boundaries -mavx -msse4 -mlzcnt -mbmi -fuse-ld=lld -fno-common -fno-record-gcc-switches -pthread -DNDEBUG -static -fvisibility=hidden -fvisibility-inlines-hidden -fomit-frame-pointer -fno-rtti -fdata-sections -ffunction-sections -Wno-c2y-extensions")
+set(CMAKE_C_FLAGS "-O3 -ffast-math -mfma -mavx2 -march=native -falign-functions=32 -falign-loops=32 -mavx -msse4 -mlzcnt -mbmi -fuse-ld=lld -fno-common -fno-record-gcc-switches -pthread -DNDEBUG -static -fomit-frame-pointer -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -fdata-sections -ffunction-sections")
+set(CMAKE_CXX_FLAGS "-O3 -ffast-math -mfma -mavx2 -march=native -falign-functions=32 -falign-loops=32 -mavx -msse4 -mlzcnt -mbmi -fuse-ld=lld -fno-common -fno-record-gcc-switches -pthread -DNDEBUG -static -fvisibility=hidden -fvisibility-inlines-hidden -fomit-frame-pointer -fno-rtti -fdata-sections -ffunction-sections -Wno-c2y-extensions")
 
 add_executable(matrix src/main.cpp)
 

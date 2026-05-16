@@ -22,15 +22,14 @@ D3DXVECTOR4 vec4a;
 D3DXVECTOR4 vec4b; // out
 D3DXMATRIX vec4c;
 
-
-constexpr size_t bytes_per_iter = 16 * sizeof(float) * 3;
+static constexpr size_t bytes_per_iter = (2 + 1) * 16 * sizeof(float);
 
 void setup(const benchmark::State& state) {
     float* Af = &A._11;
     float* Bf = &B._11;
     for (int i = 0; i < 16; ++i) {
-        Af[i] = 1.0f;
-        Bf[i] = 2.0f;
+        Af[i] = 1.0f + static_cast<float>(i);
+        Bf[i] = 2.0f + static_cast<float>(i);
     }
 }
 
@@ -187,18 +186,22 @@ float* BM_D3DXVec4Transform(float* out, const float* vec, const float* mat) {
     _mm_store_ps(out, r);
     return out;
 }
-void bm_avx2(benchmark::State &s) {
+void bm_avx2(benchmark::State& s) {
+    auto* pA = reinterpret_cast<const __m256_u*>(&A._11);
+    auto* pB = reinterpret_cast<const __m256_u*>(&B._11);
+    auto* pC = reinterpret_cast<__m256_u*>(&C._11);
+
     for (auto _ : s) {
-        benchmark::DoNotOptimize(
-            MatrixMultiplyAVX(
-                reinterpret_cast<__m256_u*>(&C._11),
-                reinterpret_cast<const __m256_u*>(&B._11),
-                reinterpret_cast<const __m256_u*>(&A._11)
-            )
-        );
+        benchmark::DoNotOptimize(pA);
+        benchmark::DoNotOptimize(pB);
+
+        MatrixMultiplyAVX(pC, pB, pA);
+
+        benchmark::DoNotOptimize(pC);
         benchmark::ClobberMemory();
     }
-    s.SetBytesProcessed(s.iterations() * bytes_per_iter);
+
+    s.SetBytesProcessed(static_cast<int64_t>(s.iterations()) * bytes_per_iter);
 }
 __attribute__((noinline))
 D3DXMATRIX* D3DXMatrixMultiplyTest(D3DXMATRIX* pOut, const D3DXMATRIX* pM1, const D3DXMATRIX* pM2) {
@@ -219,19 +222,94 @@ void penalty_test() {
         :
     );
 }
-void bm_d3dx9_dynamic(benchmark::State &s) {
+__m256_u* MatrixMultiplyAVXv2(__m256_u* out, const __m256_u* B, const __m256_u* A) {
+    __m256 a0 = _mm256_permute2f128_ps(A[0], A[0], 0x00);
+    __m256 a1 = _mm256_permute2f128_ps(A[0], A[0], 0x11);
+    __m256 a2 = _mm256_permute2f128_ps(A[1], A[1], 0x00);
+    __m256 a3 = _mm256_permute2f128_ps(A[1], A[1], 0x11);
+
+    __m256 b01 = B[0];
+    __m256 b23 = B[1];
+
+    __m256 b01_x = _mm256_shuffle_ps(b01, b01, 0x00);
+    __m256 b23_x = _mm256_shuffle_ps(b23, b23, 0x00);
+    __m256 b01_y = _mm256_shuffle_ps(b01, b01, 0x55);
+    __m256 b23_y = _mm256_shuffle_ps(b23, b23, 0x55);
+
+    __m256 m01_x = _mm256_mul_ps(b01_x, a0);
+    __m256 m23_x = _mm256_mul_ps(b23_x, a0);
+    __m256 m01_y = _mm256_mul_ps(b01_y, a1);
+    __m256 m23_y = _mm256_mul_ps(b23_y, a1);
+
+    __m256 b01_z = _mm256_shuffle_ps(b01, b01, 0xAA);
+    __m256 b23_z = _mm256_shuffle_ps(b23, b23, 0xAA);
+    __m256 b01_w = _mm256_shuffle_ps(b01, b01, 0xFF);
+    __m256 b23_w = _mm256_shuffle_ps(b23, b23, 0xFF);
+
+    __m256 m01_z = _mm256_mul_ps(b01_z, a2);
+    __m256 m23_z = _mm256_mul_ps(b23_z, a2);
+    __m256 m01_w = _mm256_mul_ps(b01_w, a3);
+    __m256 m23_w = _mm256_mul_ps(b23_w, a3);
+
+    __m256 sum01_xy = _mm256_add_ps(m01_x, m01_y);
+    __m256 sum23_xy = _mm256_add_ps(m23_x, m23_y);
+    __m256 sum01_zw = _mm256_add_ps(m01_z, m01_w);
+    __m256 sum23_zw = _mm256_add_ps(m23_z, m23_w);
+
+    out[0] = _mm256_add_ps(sum01_xy, sum01_zw);
+    out[1] = _mm256_add_ps(sum23_xy, sum23_zw);
+
+    return out;
+}
+
+__m256_u* MatrixMultiplyAVX3(__m256_u* out, const __m256_u* B, const __m256_u* A) {
+    __m256_u a01 = A[0];
+    __m256_u a23 = A[1];
+
+    __m128_u a0 = _mm256_castps256_ps128(a01);
+    __m128_u a1 = _mm256_extractf128_ps(a01, 1);
+    __m128_u a2 = _mm256_castps256_ps128(a23);
+    __m128_u a3 = _mm256_extractf128_ps(a23, 1);
+
+    for (int i = 0; i < 2; ++i) {
+        __m256_u b_row = B[i];
+
+        __m128_u b0 = _mm256_castps256_ps128(b_row);
+        __m128_u b1 = _mm256_extractf128_ps(b_row, 1);
+
+        __m128_u r0 = _mm_fmadd_ps(_mm_shuffle_ps(b0, b0, 0x00), a0,
+                      _mm_fmadd_ps(_mm_shuffle_ps(b0, b0, 0x55), a1,
+                      _mm_fmadd_ps(_mm_shuffle_ps(b0, b0, 0xAA), a2,
+                         _mm_mul_ps(_mm_shuffle_ps(b0, b0, 0xFF), a3))));
+
+        __m128_u r1 = _mm_fmadd_ps(_mm_shuffle_ps(b1, b1, 0x00), a0,
+                      _mm_fmadd_ps(_mm_shuffle_ps(b1, b1, 0x55), a1,
+                      _mm_fmadd_ps(_mm_shuffle_ps(b1, b1, 0xAA), a2,
+                         _mm_mul_ps(_mm_shuffle_ps(b1, b1, 0xFF), a3))));
+
+        out[i] = _mm256_insertf128_ps(_mm256_castps128_ps256(r0), r1, 1);
+    }
+
+    return out;
+}
+void bm_d3dx9_dynamic(benchmark::State& s) {
+    auto* pA = reinterpret_cast<const __m256_u*>(&A._11);
+    auto* pB = reinterpret_cast<const __m256_u*>(&B._11);
+    auto* pC = reinterpret_cast<__m256_u*>(&C._11);
+
     for (auto _ : s) {
-        // benchmark::DoNotOptimize(
-            MatrixMultiplyAVX2(
-                &C,
-                &B,
-                &A
-            );
-        // );
+        benchmark::DoNotOptimize(pA);
+        benchmark::DoNotOptimize(pB);
+
+        MatrixMultiplyAVX3(pC, pB, pA);
+
+        benchmark::DoNotOptimize(pC);
         benchmark::ClobberMemory();
     }
-    s.SetBytesProcessed(s.iterations() * bytes_per_iter);
+
+    s.SetBytesProcessed(static_cast<int64_t>(s.iterations()) * bytes_per_iter);
 }
+
 __attribute__((noinline))
 std::uint64_t strlen_sse4(const char* str) {
     const __m128i zero = _mm_setzero_si128();
@@ -294,13 +372,12 @@ int strcasecmp_sse2(const char* s0, const char* s1) {
 }
 __attribute__((noinline))
 int strcmp_sse2v3(const char *s0, const char *s1) {
-    if (__builtin_expect((s0 == nullptr || s1 == nullptr), 0)) {
-        return (s0 == s1 ? 0 : (s0 == nullptr ? -1 : 1));
-    }
-    const __m128i *lp = (const __m128i *)s0;
-    const __m128i *rp = (const __m128i *)s1;
-    const __m128i all0 = _mm_setzero_si128();
+    const __m128i all0    = _mm_setzero_si128();
+    const __m128i allones = _mm_set1_epi8(static_cast<char>(0xFF));
     const __m128i upper_mask = _mm_set1_epi8(static_cast<char>(0xDF));
+
+    const __m128i* lp = reinterpret_cast<const __m128i*>(s0);
+    const __m128i* rp = reinterpret_cast<const __m128i*>(s1);
 
     __m128i l, r;
     unsigned int m;
@@ -309,20 +386,22 @@ int strcmp_sse2v3(const char *s0, const char *s1) {
     do {
         l = _mm_loadu_si128(lp + i);
         r = _mm_loadu_si128(rp + i);
-        const __m128i case_lcl = _mm_and_si128(l, upper_mask);
-        const __m128i case_lcr = _mm_and_si128(r, upper_mask);
-        __m128i eq = _mm_cmpeq_epi8(l, r);
-        __m128i null_mask = _mm_cmpeq_epi8(l, all0);
 
-        m = (unsigned int)_mm_movemask_epi8(_mm_or_si128(null_mask, _mm_andnot_si128(eq, _mm_set1_epi8(-1))));
+        const __m128i cl        = _mm_and_si128(l, upper_mask);
+        const __m128i cr        = _mm_and_si128(r, upper_mask);
+        const __m128i null_mask = _mm_cmpeq_epi8(l, all0);
+        const __m128i eq        = _mm_cmpeq_epi8(cl, cr);
 
+        m = static_cast<unsigned int>(
+            _mm_movemask_epi8(_mm_or_si128(null_mask, _mm_andnot_si128(eq, allones)))
+        );
         ++i;
     } while (!m);
 
-    int index = __builtin_ctz(m);
+    const int idx = __builtin_ctz(m);
     const unsigned char* p0 = reinterpret_cast<const unsigned char*>(s0) + ((i - 1) * 16);
     const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1) + ((i - 1) * 16);
-    return (int)p0[index] - (int)p1[index];
+    return static_cast<int>(p0[idx]) - static_cast<int>(p1[idx]);
 }
 inline __m128i upcase_si128(__m128i src) { // Peter Cordes upcase
     // The above 2 paragraphs were comments here
@@ -361,23 +440,40 @@ int stricmp_sse42(const char* s1, const char* s2) {
 }
 // test for penalty
 void bm_penalty(benchmark::State& s) {
+    auto* pA = reinterpret_cast<const __m256_u*>(&A._11);
+    auto* pB = reinterpret_cast<const __m256_u*>(&B._11);
+    auto* pC = reinterpret_cast<__m256_u*>(&C._11);
+
     for (auto _ : s) {
+        benchmark::DoNotOptimize(C);
+        benchmark::DoNotOptimize(B);
+
         MatrixMultiplyAVX2(&C, &B, &A);
-    // non call instruction
-        // asm volatile(
-        //     ".intel_syntax noprefix\n\t"
-        //     "mulps xmm15, xmm1\n\t"
-        //     "addps xmm14, xmm0\n\t"
-        //     ".att_syntax prefix\n\t"
-        //     :
-        //     :
-        //     :
-        // );
-    // call instruction
-        // penalty_test();
+
+        benchmark::DoNotOptimize(A);
         benchmark::ClobberMemory();
     }
+
+    s.SetBytesProcessed(static_cast<int64_t>(s.iterations()) * bytes_per_iter);
 }
+// void bm_penalty(benchmark::State& s) {
+//     for (auto _ : s) {
+//         MatrixMultiplyAVX2(&C, &B, &A);
+//     // non call instruction
+//         // asm volatile(
+//         //     ".intel_syntax noprefix\n\t"
+//         //     "mulps xmm15, xmm1\n\t"
+//         //     "addps xmm14, xmm0\n\t"
+//         //     ".att_syntax prefix\n\t"
+//         //     :
+//         //     :
+//         //     :
+//         // );
+//     // call instruction
+//         // penalty_test();
+//         benchmark::ClobberMemory();
+//     }
+// }
 void bm_vec4(benchmark::State& s) {
     volatile float* out;
     for (auto _ : s) {
@@ -440,7 +536,7 @@ void bm_strcasecmptest1(benchmark::State& s){
     int out = 0;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = strcasecmp_sse2(var2, var9)
+            out = strcasecmp_sse2(var6, var7)
         );
         benchmark::ClobberMemory();
     }
@@ -450,7 +546,7 @@ void bm_strcasecmptest2(benchmark::State& s){
     int out = 0;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = stricmp_sse42(var2, var9)
+            out = stricmp_sse42(var6, var7)
         );
         benchmark::ClobberMemory();
     }
@@ -459,7 +555,7 @@ void bm_strcasecmptest3(benchmark::State& s){
     int out = 0;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = strcmp_sse2v3(var2, var9)
+            out = strcmp_sse2v3(var6, var7)
         );
         benchmark::ClobberMemory();
     }
@@ -598,7 +694,14 @@ int strcmp_sse42(const char* s1, const char* s2) {
         if (v3 != 16) {
             unsigned char ca = static_cast<unsigned char>(s1[v3]);
             unsigned char cb = static_cast<unsigned char>(s2[v3]);
-            return static_cast<int>(ca) - static_cast<int>(cb);
+            auto val = static_cast<int>(ca) - static_cast<int>(cb);
+            if (val < 0) {
+                return -1;
+            } else if (val > 0) {
+                return 1;
+            } else {
+                return 0;
+            }
         }
 
         if (_mm_cmpistrz(v1, v2, mode)) {
@@ -757,41 +860,35 @@ inline int safe_fast_memcmp(const void* s1, const void* s2, size_t n) {
 inline int safe_fast_memcmp2(const void* s1, const void* s2, size_t n) {
     const uint8_t *p1 = (const uint8_t*)s1, *p2 = (const uint8_t*)s2;
 
-    if (n >= 8) {
-        uint64_t a, b;
-        __builtin_memcpy(&a, p1, 8); __builtin_memcpy(&b, p2, 8);
-        if (a != b) {
-            return __builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1;
+        if (n >= 8) {
+            uint64_t a, b;
+            __builtin_memcpy(&a, p1, 8); __builtin_memcpy(&b, p2, 8);
+            if (a != b) return __builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1;
+
+            __builtin_memcpy(&a, p1 + n - 8, 8); __builtin_memcpy(&b, p2 + n - 8, 8);
+            return (a == b) ? 0 : (__builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1);
         }
 
-        __builtin_memcpy(&a, p1 + n - 8, 8); __builtin_memcpy(&b, p2 + n - 8, 8);
-        return (a == b) ? 0 : (__builtin_bswap64(a) > __builtin_bswap64(b) ? 1 : -1);
-    }
+        if (n >= 4) {
+            uint32_t a, b;
+            __builtin_memcpy(&a, p1, 4); __builtin_memcpy(&b, p2, 4);
+            if (a != b) return __builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1;
 
-    if (n >= 4) {
-        uint32_t a, b;
-        __builtin_memcpy(&a, p1, 4); __builtin_memcpy(&b, p2, 4);
-        if (a != b) {
-            return __builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1;
+            __builtin_memcpy(&a, p1 + n - 4, 4); __builtin_memcpy(&b, p2 + n - 4, 4);
+            return (a == b) ? 0 : (__builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1);
         }
 
-        __builtin_memcpy(&a, p1 + n - 4, 4); __builtin_memcpy(&b, p2 + n - 4, 4);
-        return (a == b) ? 0 : (__builtin_bswap32(a) > __builtin_bswap32(b) ? 1 : -1);
-    }
+        if (n >= 2) {
+            uint16_t a, b;
+            __builtin_memcpy(&a, p1, 2); __builtin_memcpy(&b, p2, 2);
+            if (a != b) return __builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1;
 
-    if (n >= 2) {
-        uint16_t a, b;
-        __builtin_memcpy(&a, p1, 2); __builtin_memcpy(&b, p2, 2);
-        if (a != b) {
-            return __builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1;
+            __builtin_memcpy(&a, p1 + n - 2, 2); __builtin_memcpy(&b, p2 + n - 2, 2);
+            return (a == b) ? 0 : (__builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1);
         }
 
-        __builtin_memcpy(&a, p1 + n - 2, 2); __builtin_memcpy(&b, p2 + n - 2, 2);
-        return (a == b) ? 0 : (__builtin_bswap16(a) > __builtin_bswap16(b) ? 1 : -1);
+        return n ? (int)*p1 - (int)*p2 : 0;
     }
-
-    return n ? (int)*p1 - (int)*p2 : 0;
-}
 __attribute__((noinline))
 int avx2_memcmp(const void *s1, const void *s2, size_t n) {
     const unsigned char *p1 = (const unsigned char *)s1;
@@ -837,7 +934,7 @@ void bm_memcmp(benchmark::State& s){
     int out;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = memcmp_scalar(var6, var7, 7)
+            out = memcmp_scalar(var6, var7, 14)
         );
         benchmark::ClobberMemory();
     }
@@ -846,16 +943,143 @@ void bm_memcmpsse2(benchmark::State& s){
     int out;
     for (auto _ : s) {
         benchmark::DoNotOptimize(
-            out = avx2_memcmp(var6, var7, 7)
+            out = avx2_memcmp(var6, var7, 14)
         );
         benchmark::ClobberMemory();
     }
 }
-    // 1,7,11 14 and 15
+
+__attribute__((noinline))
+char* __cdecl strstr_sse42(const char* Str, const char* SubStr) {
+    // if (!*SubStr) return (char*)Str;
+
+    __m128i needle = _mm_loadu_si128((const __m128i*)SubStr);
+    const int mode = _SIDD_CMP_EQUAL_ORDERED | _SIDD_UBYTE_OPS | _SIDD_BIT_MASK | _SIDD_MASKED_POSITIVE_POLARITY;
+
+    const char* s = Str;
+    while (true) {
+        __m128i hay = _mm_loadu_si128((const __m128i*)s);
+
+        int idx = _mm_cmpistri(needle, hay, mode);
+        bool found_null = _mm_cmpistrz(needle, hay, mode);
+
+        if (idx < 16) {
+            const char* candidate = s + idx;
+            const char* p = candidate;
+            const char* q = SubStr;
+
+            while (*q && *p == *q) {
+                p++; q++;
+
+                if (!*q || *p != *q) break;
+                p++; q++;
+
+                if (!*q || *p != *q) break;
+                p++; q++;
+
+                if (!*q || *p != *q) break;
+                p++; q++;
+            }
+            if (!*q) return (char*)candidate;
+
+            s = candidate + 1;
+            continue;
+        }
+
+        if (found_null) break;
+
+        s += 16;
+    }
+
+    return nullptr;
+}
+__attribute__((noinline))
+char* strstr_wrapper(const char* a, const char* b) {
+    return __builtin_strstr(a, b);
+}
+__attribute__((noinline))
+char* __cdecl strstr_sse422(const char* Str, const char* SubStr) {
+    // if (__builtin_expect(!*SubStr, 0)) return (char*)Str;
+
+    const __m128i needle  = _mm_loadu_si128((const __m128i*)SubStr);
+    const __m128i zeros   = _mm_setzero_si128();
+
+    const int  null_bits    = _mm_movemask_epi8(_mm_cmpeq_epi8(needle, zeros));
+    const bool needle_short = (null_bits != 0);
+    const int  need_mask    = needle_short
+                                ? (null_bits & -null_bits) - 1
+                                : 0xFFFF;
+
+    const int mode = _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ORDERED |
+                     _SIDD_BIT_MASK   | _SIDD_MASKED_POSITIVE_POLARITY;
+
+    const char* s = Str;
+    while (true) {
+
+        const __m128i hay = _mm_loadu_si128((const __m128i*)s);
+
+        unsigned candidates = (unsigned)_mm_cvtsi128_si32(
+                                  _mm_cmpistrm(needle, hay, mode));
+        while (candidates) {
+            const int   idx       = _tzcnt_u32(candidates);
+            candidates            = _blsr_u32(candidates);
+            const char* candidate = s + idx;
+
+            const int got = _mm_movemask_epi8(
+                _mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)candidate), needle));
+
+            if ((got & need_mask) == need_mask) {
+                if (needle_short) return (char*)candidate;
+
+                bool match = true;
+                for (int off = 16; match; off += 16) {
+                    const __m128i n = _mm_loadu_si128((const __m128i*)(SubStr    + off));
+                    const __m128i h = _mm_loadu_si128((const __m128i*)(candidate + off));
+                    const int nulls = _mm_movemask_epi8(_mm_cmpeq_epi8(n, zeros));
+                    const int neq   = _mm_movemask_epi8(_mm_cmpeq_epi8(h, n)) ^ 0xFFFF;
+                    if (nulls) {
+                        const int valid = (nulls & -nulls) - 1;
+                        match = !(neq & valid);
+                        break;
+                    }
+                    if (neq) { match = false; }
+                }
+                if (match) return (char*)candidate;
+            }
+        }
+
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(hay, zeros))) break;
+
+        s += 16;
+    }
+    return nullptr;
+}
+void bm_strstr(benchmark::State& s){
+    char* out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = strstr_sse422(var4, str2)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+void bm_strstrsse(benchmark::State& s){
+    char* out;
+    for (auto _ : s) {
+        benchmark::DoNotOptimize(
+            out = strstr_sse42(var4, str2)
+        );
+        benchmark::ClobberMemory();
+    }
+}
+
+/* strstr */
+// BENCHMARK(bm_strstr);
+// BENCHMARK(bm_strstrsse);
 
 /* memcmp */
-BENCHMARK(bm_memcmp);
-BENCHMARK(bm_memcmpsse2);
+// BENCHMARK(bm_memcmp);
+// BENCHMARK(bm_memcmpsse2);
 
 /* strcmp */
 // BENCHMARK(bm_strcmpsse2);
@@ -866,24 +1090,24 @@ BENCHMARK(bm_memcmpsse2);
 // BENCHMARK(bm_strchrsse4);
 
 /* strcasecmp */
-// BENCHMARK(bm_strcasecmptest1);
-// BENCHMARK(bm_strcasecmptest2);
-// BENCHMARK(bm_strcasecmptest3);
+BENCHMARK(bm_strcasecmptest1)->MinWarmUpTime(5);
+BENCHMARK(bm_strcasecmptest2)->MinWarmUpTime(5);
+BENCHMARK(bm_strcasecmptest3)->MinWarmUpTime(5);
 
 /* strlen benchmark */
 // BENCHMARK(bm_strlensse4);
 // BENCHMARK(bm_strlenavx2);
 // BENCHMARK(bm_strlendefault);
 
-// BENCHMARK(bm_avx2)->Setup(setup);
+// BENCHMARK(bm_avx2)->Setup(setup)->MinWarmUpTime(10);
 // BENCHMARK(bm_vec4)->Setup(setup_transform)->Iterations(4736842105);
-// BENCHMARK(bm_d3dx9_dynamic)->Setup(setup);
-// BENCHMARK(bm_penalty)->Setup(setup);
+// BENCHMARK(bm_d3dx9_dynamic)->Setup(setup)->MinWarmUpTime(10);
+// BENCHMARK(bm_penalty)->Setup(setup)->MinWarmUpTime(2);
 
 int main(int argc, char** argv) {
+    SetThreadAffinityMask(GetCurrentThread(), 1);
     SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-    SetThreadAffinityMask(GetCurrentThread(), 1);
     benchmark::MaybeReenterWithoutASLR(argc, argv);
     char arg0_default[] = "benchmark";
     char* args_default = reinterpret_cast<char*>(arg0_default);

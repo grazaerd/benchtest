@@ -105,7 +105,7 @@ inline const char* var1 =
     "aptent taciti sociosqu ad litora torquent per conubia nostra inceptos "
     "himenaeos orci varius natoque penatibus et.";
 
-inline const char* var2 = "Test short aTest short aaaaaaaaaaaaaaaaaaaaaaaaTest a b c d / www\npc/Test.ext";
+inline const char* var2 = "Tesd short aTest short aaaaaaaaaaaaaaaaaaaaaaaaTest a b c d / www\npc/Test.ext";
 inline const char* var9 = "Test short aTest short aaaaaaaaaaaaaaaaaaaaaaaaTest a b c d / www\npc/Test.exd";
 
 
@@ -129,8 +129,10 @@ inline const char* var4 =
 
 inline const char* var5 = "resourceexttssxx\\";
 
-inline const char* var6 = "RN01_Sainthaven_A_GoddessStatue_Renew_Waterfall.skn";
+inline const char* var6 = "RN01_Sainthavxn_A_GoddessStatue_Renew_Waterfall.skn";
 inline const char* var7 = "RN01_Sainthaven_A_GoddessStatue_Renew_Waterfall.skx";
 
+inline const char* str1 = "\\resource\\ext\\imprintingtable_commonweapon2021.dnt";
+inline const char* str2 = "nascetur";
 
 #endif
