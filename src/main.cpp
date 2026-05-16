@@ -438,6 +438,32 @@ int stricmp_sse42(const char* s1, const char* s2) {
     }
     return 0;
 }
+__attribute__((noinline,target("avx512f")))
+float* MatrixMultiplyAVX512(float* out, const float* B, const float* A) {
+	    __m128 a_row0 = _mm_loadu_ps(&A[0]);
+	    __m128 a_row1 = _mm_loadu_ps(&A[4]);
+	    __m128 a_row2 = _mm_loadu_ps(&A[8]);
+	    __m128 a_row3 = _mm_loadu_ps(&A[12]);
+
+	    __m512 a_splat0 = _mm512_broadcast_f32x4(a_row0);
+	    __m512 a_splat1 = _mm512_broadcast_f32x4(a_row1);
+	    __m512 a_splat2 = _mm512_broadcast_f32x4(a_row2);
+	    __m512 a_splat3 = _mm512_broadcast_f32x4(a_row3);
+
+	    __m512 b_matrix = _mm512_loadu_ps(B);
+
+	    __m512 b_bcast_col0 = _mm512_shuffle_ps(b_matrix, b_matrix, _MM_SHUFFLE(0, 0, 0, 0));
+	    __m512 b_bcast_col1 = _mm512_shuffle_ps(b_matrix, b_matrix, _MM_SHUFFLE(1, 1, 1, 1));
+	    __m512 b_bcast_col2 = _mm512_shuffle_ps(b_matrix, b_matrix, _MM_SHUFFLE(2, 2, 2, 2));
+	    __m512 b_bcast_col3 = _mm512_shuffle_ps(b_matrix, b_matrix, _MM_SHUFFLE(3, 3, 3, 3));
+
+	    __m512 res = _mm512_mul_ps(b_bcast_col0, a_splat0);
+	    res = _mm512_fmadd_ps(b_bcast_col1, a_splat1, res);
+	    res = _mm512_fmadd_ps(b_bcast_col2, a_splat2, res);
+	    res = _mm512_fmadd_ps(b_bcast_col3, a_splat3, res);
+	    _mm512_storeu_ps(out, res);
+	    return out;
+}
 // test for penalty
 void bm_penalty(benchmark::State& s) {
     auto* pA = reinterpret_cast<const __m256_u*>(&A._11);
@@ -448,7 +474,9 @@ void bm_penalty(benchmark::State& s) {
         benchmark::DoNotOptimize(C);
         benchmark::DoNotOptimize(B);
 
-        MatrixMultiplyAVX2(&C, &B, &A);
+        MatrixMultiplyAVX512(reinterpret_cast<float*>(&C),
+                             reinterpret_cast<const float*>(&B),
+                             reinterpret_cast<const float*>(&A));
 
         benchmark::DoNotOptimize(A);
         benchmark::ClobberMemory();
@@ -1090,19 +1118,19 @@ void bm_strstrsse(benchmark::State& s){
 // BENCHMARK(bm_strchrsse4);
 
 /* strcasecmp */
-BENCHMARK(bm_strcasecmptest1)->MinWarmUpTime(5);
-BENCHMARK(bm_strcasecmptest2)->MinWarmUpTime(5);
-BENCHMARK(bm_strcasecmptest3)->MinWarmUpTime(5);
+// BENCHMARK(bm_strcasecmptest1)->MinWarmUpTime(5);
+// BENCHMARK(bm_strcasecmptest2)->MinWarmUpTime(5);
+// BENCHMARK(bm_strcasecmptest3)->MinWarmUpTime(5);
 
 /* strlen benchmark */
 // BENCHMARK(bm_strlensse4);
 // BENCHMARK(bm_strlenavx2);
 // BENCHMARK(bm_strlendefault);
 
-// BENCHMARK(bm_avx2)->Setup(setup)->MinWarmUpTime(10);
+BENCHMARK(bm_avx2)->Setup(setup)->MinWarmUpTime(10);
 // BENCHMARK(bm_vec4)->Setup(setup_transform)->Iterations(4736842105);
 // BENCHMARK(bm_d3dx9_dynamic)->Setup(setup)->MinWarmUpTime(10);
-// BENCHMARK(bm_penalty)->Setup(setup)->MinWarmUpTime(2);
+BENCHMARK(bm_penalty)->Setup(setup)->MinWarmUpTime(10);
 
 int main(int argc, char** argv) {
     SetThreadAffinityMask(GetCurrentThread(), 1);
